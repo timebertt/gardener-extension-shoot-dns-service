@@ -18,6 +18,8 @@
 package config
 
 import (
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 )
@@ -44,6 +46,11 @@ type DNSServiceConfig struct {
 	GardenID string
 	SeedID   string
 	DNSClass string
+}
+
+// EntryLabelPrefix calculated the label prefix for dns entries managed for shoots of this garden
+func (c *DNSServiceConfig) EntryLabelPrefix() string {
+	return fmt.Sprintf("%s.gardener.cloud/", c.GardenID)
 }
 
 // HealthCheckConfig are options to apply when adding the health check controller to the manager.

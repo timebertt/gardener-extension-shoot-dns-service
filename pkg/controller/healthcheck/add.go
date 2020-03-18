@@ -15,8 +15,8 @@
 package healthcheck
 
 import (
-	dnscontroller "github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller"
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/config"
+	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/lifecycle"
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/service"
 
 	"github.com/gardener/gardener-extensions/pkg/controller/healthcheck"
@@ -44,7 +44,7 @@ func RegisterHealthChecks(mgr manager.Manager) error {
 		opts,
 		nil,
 		map[healthcheck.HealthCheck]string{
-			general.CheckManagedResource(dnscontroller.ShootResourcesName): string(gardencorev1beta1.ShootSystemComponentsHealthy),
-			general.CheckManagedResource(dnscontroller.SeedResourcesName):  string(gardencorev1beta1.ShootControlPlaneHealthy),
+			general.CheckManagedResource(lifecycle.ShootResourcesName): string(gardencorev1beta1.ShootSystemComponentsHealthy),
+			general.CheckManagedResource(lifecycle.SeedResourcesName):  string(gardencorev1beta1.ShootControlPlaneHealthy),
 		})
 }
