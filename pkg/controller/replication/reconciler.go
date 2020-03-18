@@ -1,21 +1,41 @@
+/*
+ * Copyright 2020 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
 package replication
 
 import (
-	"reflect"
+	"context"
+
+	dnsapi "github.com/gardener/external-dns-management/pkg/apis/dns/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/go-logr/logr"
-	"k8s.io/apimachinery/pkg/util/sets"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	extapi "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 
-	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/apis"
 	controllerconfig "github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/config"
 )
 
 type reconciler struct {
+	ctx    context.Context
+	name   string
 	logger logr.Logger
 	client client.Client
 
@@ -25,9 +45,9 @@ type reconciler struct {
 // NewReconciler creates a new reconcile.Reconciler that reconciles
 // Extension resources of Gardener's `extensions.gardener.cloud` API group.
 func NewReconciler(name string, controllerConfig controllerconfig.DNSServiceConfig) reconcile.Reconciler {
-	logger := log.Log.WithName(name)
 	return &reconciler{
-		logger:           logger,
+		ctx:              context.Background(),
+		name:             name,
 		controllerConfig: controllerConfig,
 	}
 }
@@ -43,76 +63,58 @@ func (r *reconciler) InjectClient(client client.Client) error {
 	return nil
 }
 
+// InjectClient injects the controller runtime client into the reconciler.
+func (r *reconciler) InjectLogger(l logr.Logger) error {
+	r.logger = l.WithName(r.name)
+	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// entry reconcilation
+
 func (r *reconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) {
 	result := reconcile.Result{}
+
+	ext, err:=r.findExtension(req.Namespace)
+	if err != nil {
+	    return result, err
+	}
+	statehandler, err:=NewStateHandler(r.ctx, r.client, ext)
+	if err != nil {
+		return result, err
+	}
+
+	mod:=false
+	entry:=&dnsapi.DNSEntry{}
+	err=r.client.Get(r.ctx, req.NamespacedName, entry)
+	if err!=nil {
+		if !errors.IsNotFound(err) {
+			return result, err
+		}
+		mod=r.delete(statehandler, req)
+	}
+	if entry.DeletionTimestamp!=nil {
+		mod=r.delete(statehandler, req)
+	} else {
+		mod= r.reconcile(statehandler, entry)
+	}
+	if mod {
+		return result, statehandler.Update()
+	}
 	return result, nil
 }
 
-func (r *reconciler) ensureEntries(state *apis.DNSState, entries []*apis.DNSEntry) bool {
-	mod:=false
-	names:=sets.String{}
-	for _, entry := range entries {
-		mod=r.ensureEntryFor(state, entry)
-		names.Insert(entry.Name)
-	}
-	if len(entries) != len(state.Entries) {
-		for i, e := range state.Entries {
-			if !names.Has(e.Name) {
-				mod=true
-				state.Entries=append(state.Entries[:i], state.Entries[i+1:]...)
-			}
-		}
-	}
-	return mod
+func (r *reconciler) reconcile(statehandler *StateHandler, entry *dnsapi.DNSEntry) bool {
+	return statehandler.EnsureEntryFor(entry)
 }
 
-func (r *reconciler) ensureEntryDeleted(state *apis.DNSState, name string) bool {
-	for i, e := range state.Entries {
-		if e.Name ==name {
-			state.Entries=append(state.Entries[:i], state.Entries[i+1:]...)
-			return true
-		}
-	}
-	return false
+func (r *reconciler) delete(statehandler *StateHandler, req reconcile.Request) bool {
+	return statehandler.EnsureEntryDeleted(req.Name)
 }
 
-func (r *reconciler) ensureEntryFor(state *apis.DNSState, entry *apis.DNSEntry) bool {
-	for _, e := range state.Entries {
-		if e.Name == entry.Name {
-			mod := false
-			if !reflect.DeepEqual(&e.Spec, &entry.Spec) {
-				mod = true
-				e.Spec = entry.Spec.DeepCopy()
-			}
-			if !reflect.DeepEqual(&e.Annotations, &entry.Annotations) {
-				mod = true
-				e.Annotations = CopyMap(entry.Annotations)
-			}
-			if !reflect.DeepEqual(&e.Labels, &entry.Labels) {
-				mod = true
-				e.Labels = CopyMap(entry.Labels)
-			}
-			return mod
-		}
-	}
+////////////////////////////////////////////////////////////////////////////////
+// extension handling
 
-	e := &apis.DNSEntry{
-		Name:        entry.Name,
-		Labels:      CopyMap(entry.Labels),
-		Annotations: CopyMap(entry.Annotations),
-		Spec:        entry.Spec.DeepCopy(),
-	}
-	state.Entries = append(state.Entries, e)
-	return true
-}
-
-func CopyMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	r := map[string]string{}
-	for k, v := range m {
-		r[k] = v
-	}
-	return r
+func (r *reconciler) findExtension(namespace string) (*extapi.Extension, error) {
+	return FindExtension(r.ctx, r.client, namespace)
 }
