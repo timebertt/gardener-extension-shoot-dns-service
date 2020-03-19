@@ -23,6 +23,7 @@ import (
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	gardencorev1beta1helper "github.com/gardener/gardener/pkg/apis/core/v1beta1/helper"
 
+	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/common"
 	controllerconfig "github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/config"
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/imagevector"
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/service"
@@ -35,14 +36,12 @@ import (
 	"github.com/gardener/gardener/pkg/client/kubernetes"
 	"github.com/gardener/gardener/pkg/utils/chart"
 	"github.com/gardener/gardener/pkg/utils/secrets"
-	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -59,33 +58,28 @@ const (
 // NewActuator returns an actuator responsible for Extension resources.
 func NewActuator(config controllerconfig.DNSServiceConfig) extension.Actuator {
 	return &actuator{
-		logger:           log.Log.WithName(ActuatorName),
-		controllerConfig: config,
+		Env: common.NewEnv(ActuatorName, config),
 	}
 }
 
 type actuator struct {
-	applier  kubernetes.ChartApplier
-	renderer chartrenderer.Interface
-	client   client.Client
-	config   *rest.Config
-
-	controllerConfig controllerconfig.DNSServiceConfig
-
-	logger logr.Logger
+	*common.Env
+	applier    kubernetes.ChartApplier
+	renderer   chartrenderer.Interface
+	restConfig *rest.Config
 }
 
 // InjectConfig injects the rest config to this actuator.
 func (a *actuator) InjectConfig(config *rest.Config) error {
-	a.config = config
+	a.restConfig = config
 
-	applier, err := kubernetes.NewChartApplierForConfig(a.config)
+	applier, err := kubernetes.NewChartApplierForConfig(a.restConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create chart applier: %v", err)
 	}
 	a.applier = applier
 
-	renderer, err := chartrenderer.NewForConfig(a.config)
+	renderer, err := chartrenderer.NewForConfig(a.restConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create chart renderer: %v", err)
 	}
@@ -94,15 +88,9 @@ func (a *actuator) InjectConfig(config *rest.Config) error {
 	return nil
 }
 
-// InjectClient injects the controller runtime client into the reconciler.
-func (a *actuator) InjectClient(client client.Client) error {
-	a.client = client
-	return nil
-}
-
 // Reconcile the Extension resource.
 func (a *actuator) Reconcile(ctx context.Context, ex *extensionsv1alpha1.Extension) error {
-	cluster, err := controller.GetCluster(ctx, a.client, ex.Namespace)
+	cluster, err := controller.GetCluster(ctx, a.Client(), ex.Namespace)
 	if err != nil {
 		return err
 	}
@@ -111,30 +99,36 @@ func (a *actuator) Reconcile(ctx context.Context, ex *extensionsv1alpha1.Extensi
 	// don't get an DNS service
 	if gardencorev1beta1helper.TaintsHave(cluster.Seed.Spec.Taints, gardencorev1beta1.SeedTaintDisableDNS) ||
 		cluster.Shoot.Spec.DNS == nil {
-		a.logger.Info("DNS domain is not specified or the seed is tainted with 'disable-dns', therefore no shoot dns service is installed", "shoot", ex.Namespace)
+		a.Info("DNS domain is not specified or the seed is tainted with 'disable-dns', therefore no shoot dns service is installed", "shoot", ex.Namespace)
 		return a.Delete(ctx, ex)
 	}
 
 	if err := a.createShootResources(ctx, cluster, ex.Namespace); err != nil {
 		return err
 	}
-	return a.createSeedResources(ctx, cluster, ex.Namespace)
+	return a.createSeedResources(ctx, cluster, ex)
 }
 
 // Delete the Extension resource.
 func (a *actuator) Delete(ctx context.Context, ex *extensionsv1alpha1.Extension) error {
-	if err := a.deleteSeedResources(ctx, ex.Namespace); err != nil {
+	if err := a.deleteSeedResources(ctx, ex); err != nil {
 		return err
 	}
 	return a.deleteShootResources(ctx, ex.Namespace)
 }
 
-func (a *actuator) shootId(namespace string) string {
-	return fmt.Sprintf("%s%s", a.controllerConfig.EntryLabelPrefix(), namespace)
-}
-
-func (a *actuator) createSeedResources(ctx context.Context, cluster *controller.Cluster, namespace string) error {
+func (a *actuator) createSeedResources(ctx context.Context, cluster *controller.Cluster, ex *extensionsv1alpha1.Extension) error {
+	namespace := ex.Namespace
 	shootKubeconfig, err := a.createKubeconfig(ctx, namespace)
+	if err != nil {
+		return err
+	}
+
+	handler, err := common.NewStateHandler(a.Env, ex, true)
+	if err != nil {
+		return err
+	}
+	err = handler.Update()
 	if err != nil {
 		return err
 	}
@@ -143,10 +137,10 @@ func (a *actuator) createSeedResources(ctx context.Context, cluster *controller.
 		"serviceName":         service.ServiceName,
 		"replicas":            controller.GetReplicas(cluster, 1),
 		"targetClusterSecret": shootKubeconfig.GetName(),
-		"gardenId":            a.controllerConfig.GardenID,
-		"shootId":             a.shootId(namespace),
-		"seedId":              a.controllerConfig.SeedID,
-		"dnsClass":            a.controllerConfig.DNSClass,
+		"gardenId":            a.Config().GardenID,
+		"shootId":             a.ShootId(namespace),
+		"seedId":              a.Config().SeedID,
+		"dnsClass":            a.Config().DNSClass,
 		"podAnnotations": map[string]interface{}{
 			"checksum/secret-kubeconfig": util.ComputeChecksum(shootKubeconfig.Data),
 		},
@@ -157,40 +151,37 @@ func (a *actuator) createSeedResources(ctx context.Context, cluster *controller.
 		return fmt.Errorf("failed to find image version for %s: %v", service.ImageName, err)
 	}
 
-	a.logger.Info("Component is being applied", "component", service.ExtensionServiceName, "namespace", namespace)
+	a.Info("Component is being applied", "component", service.ExtensionServiceName, "namespace", namespace)
 	return a.createManagedResource(ctx, namespace, SeedResourcesName, "seed", a.renderer, service.SeedChartName, chartValues, nil)
 }
 
-func (a *actuator) deleteSeedResources(ctx context.Context, namespace string) error {
-	a.logger.Info("Component is being deleted", "component", service.ExtensionServiceName, "namespace", namespace)
+func (a *actuator) deleteSeedResources(ctx context.Context, ex *extensionsv1alpha1.Extension) error {
+	namespace := ex.Namespace
+	a.Info("Component is being deleted", "component", service.ExtensionServiceName, "namespace", namespace)
 
-	if err := controller.DeleteManagedResource(ctx, a.client, namespace, SeedResourcesName); err != nil {
+	if err := controller.DeleteManagedResource(ctx, a.Client(), namespace, SeedResourcesName); err != nil {
 		return err
 	}
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if err := controller.WaitUntilManagedResourceDeleted(timeoutCtx, a.client, namespace, SeedResourcesName); err != nil {
+	if err := controller.WaitUntilManagedResourceDeleted(timeoutCtx, a.Client(), namespace, SeedResourcesName); err != nil {
 		return err
 	}
 
 	secret := &corev1.Secret{}
 	secret.SetName(service.SecretName)
 	secret.SetNamespace(namespace)
-	if err := a.client.Delete(ctx, secret); client.IgnoreNotFound(err) != nil {
+	if err := a.Client().Delete(ctx, secret); client.IgnoreNotFound(err) != nil {
 		return err
 	}
 
-	shootId := a.shootId(namespace)
-	list := &unstructured.UnstructuredList{}
-	list.SetAPIVersion("dns.gardener.cloud/v1alpha1")
-	list.SetKind("DNSEntry")
-	if err := a.client.List(ctx, list, client.InNamespace(namespace), client.MatchingLabels(map[string]string{shootId: "true"})); err != nil {
-		return nil
+	handler, err := common.NewStateHandler(a.Env, ex, true)
+	if err != nil {
+		return err
 	}
-
-	for _, item := range list.Items {
-		if err := a.client.Delete(ctx, &item); client.IgnoreNotFound(err) != nil {
+	for _, item := range handler.Items() {
+		if err := handler.Delete(item.Name); err != nil {
 			return err
 		}
 	}
@@ -201,14 +192,14 @@ func (a *actuator) createShootResources(ctx context.Context, cluster *controller
 	crd := &unstructured.Unstructured{}
 	crd.SetAPIVersion("apiextensions.k8s.io/v1beta1")
 	crd.SetKind("CustomResourceDefinition")
-	if err := a.client.Get(ctx, client.ObjectKey{Name: "dnsentries.dns.gardener.cloud"}, crd); err != nil {
+	if err := a.Client().Get(ctx, client.ObjectKey{Name: "dnsentries.dns.gardener.cloud"}, crd); err != nil {
 		return errors.Wrap(err, "could not get crd dnsentries.dns.gardener.cloud")
 	}
 	crd.SetResourceVersion("")
 	crd.SetUID("")
 	crd.SetCreationTimestamp(metav1.Time{})
 	crd.SetGeneration(0)
-	if err := controller.CreateManagedResourceFromUnstructured(ctx, a.client, namespace, KeptShootResourcesName, "", []*unstructured.Unstructured{crd}, true, nil); err != nil {
+	if err := controller.CreateManagedResourceFromUnstructured(ctx, a.Client(), namespace, KeptShootResourcesName, "", []*unstructured.Unstructured{crd}, true, nil); err != nil {
 		return errors.Wrapf(err, "could not create managed resource %s", KeptShootResourcesName)
 	}
 
@@ -227,22 +218,22 @@ func (a *actuator) createShootResources(ctx context.Context, cluster *controller
 }
 
 func (a *actuator) deleteShootResources(ctx context.Context, namespace string) error {
-	if err := controller.DeleteManagedResource(ctx, a.client, namespace, ShootResourcesName); err != nil {
+	if err := controller.DeleteManagedResource(ctx, a.Client(), namespace, ShootResourcesName); err != nil {
 		return err
 	}
-	if err := controller.DeleteManagedResource(ctx, a.client, namespace, KeptShootResourcesName); err != nil {
+	if err := controller.DeleteManagedResource(ctx, a.Client(), namespace, KeptShootResourcesName); err != nil {
 		return err
 	}
 
 	timeoutCtx1, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if err := controller.WaitUntilManagedResourceDeleted(timeoutCtx1, a.client, namespace, ShootResourcesName); err != nil {
+	if err := controller.WaitUntilManagedResourceDeleted(timeoutCtx1, a.Client(), namespace, ShootResourcesName); err != nil {
 		return err
 	}
 
 	timeoutCtx2, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	return controller.WaitUntilManagedResourceDeleted(timeoutCtx2, a.client, namespace, KeptShootResourcesName)
+	return controller.WaitUntilManagedResourceDeleted(timeoutCtx2, a.Client(), namespace, KeptShootResourcesName)
 }
 
 func (a *actuator) createKubeconfig(ctx context.Context, namespace string) (*corev1.Secret, error) {
@@ -250,12 +241,12 @@ func (a *actuator) createKubeconfig(ctx context.Context, namespace string) (*cor
 		Name:       service.SecretName,
 		CommonName: service.UserName,
 	}
-	return util.GetOrCreateShootKubeconfig(ctx, a.client, certConfig, namespace)
+	return util.GetOrCreateShootKubeconfig(ctx, a.Client(), certConfig, namespace)
 }
 
 func (a *actuator) createManagedResource(ctx context.Context, namespace, name, class string, renderer chartrenderer.Interface, chartName string, chartValues map[string]interface{}, injectedLabels map[string]string) error {
 	return controller.CreateManagedResourceFromFileChart(
-		ctx, a.client, namespace, name, class,
+		ctx, a.Client(), namespace, name, class,
 		renderer, filepath.Join(service.ChartsPath, chartName), chartName,
 		chartValues, injectedLabels,
 	)

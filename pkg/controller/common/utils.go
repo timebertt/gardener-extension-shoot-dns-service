@@ -14,7 +14,7 @@
  *  limitations under the License.
  */
 
-package replication
+package common
 
 import (
 	"context"
@@ -38,7 +38,7 @@ func CopyMap(m map[string]string) map[string]string {
 }
 
 func FindExtension(ctx context.Context, c client.Client, namespace string) (*extapi.Extension, error) {
-	list:= &extapi.ExtensionList{}
+	list := &extapi.ExtensionList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		if errors.IsNotFound(err) {
 			return nil, nil

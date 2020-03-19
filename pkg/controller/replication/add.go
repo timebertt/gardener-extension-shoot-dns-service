@@ -42,7 +42,7 @@ const (
 func ForService(prefix string) predicate.Predicate {
 	return predutils.FromMapper(predutils.MapperFunc(func(e event.GenericEvent) bool {
 		for l, v := range e.Meta.GetLabels() {
-			if v!="true" {
+			if v != "true" {
 				continue
 			}
 			if strings.HasPrefix(l, prefix) {
@@ -55,14 +55,15 @@ func ForService(prefix string) predicate.Predicate {
 
 // AddToManager adds a DNS Service replication controller to the given Controller Manager.
 func AddToManager(mgr manager.Manager) error {
+	reconciler := NewReconciler(Name, config.ServiceConfig.DNSServiceConfig)
 	opts := controller.Options{}
-	opts.Reconciler = NewReconciler(Name, config.ServiceConfig.DNSServiceConfig)
+	opts.Reconciler = reconciler
 
 	ctrl, err := controller.New(Name, mgr, opts)
 
 	if err != nil {
 		return err
 	}
-    predicate:= ForService(config.ServiceConfig.DNSServiceConfig.EntryLabelPrefix())
+	predicate := ForService(reconciler.EntryLabelPrefix())
 	return ctrl.Watch(&source.Kind{Type: &dnsapi.DNSEntry{}}, &handler.EnqueueRequestForObject{}, predicate)
 }

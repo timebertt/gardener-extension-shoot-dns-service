@@ -14,14 +14,15 @@
  *  limitations under the License.
  */
 
-package replication
+package common
 
 import (
-	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 
 	"github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,31 +37,82 @@ import (
 // state update handling
 
 type StateHandler struct {
-	client client.Client
-	ctx context.Context
-	ext *v1alpha1.Extension
-	state *apis.DNSState
+	*Env
+	ext      *v1alpha1.Extension
+	state    *apis.DNSState
 	modified bool
+	elem     *unstructured.Unstructured
 }
 
-func NewStateHandler(ctx context.Context, client client.Client, ext *v1alpha1.Extension) (*StateHandler, error) {
-	state, err:=helper.GetExtensionState(ext)
+func NewStateHandler(env *Env, ext *v1alpha1.Extension, refresh bool) (*StateHandler, error) {
+	var err error
+
+	elem := &unstructured.Unstructured{}
+	elem.SetAPIVersion(dnsapi.SchemeGroupVersion.String())
+	elem.SetKind("DNSEntry")
+	elem.SetNamespace(ext.Namespace)
+
+	handler := &StateHandler{
+		Env:  env,
+		ext:  ext,
+		elem: elem,
+	}
+	handler.state, err = helper.GetExtensionState(ext)
+	if err != nil || refresh {
+		if err != nil {
+			handler.modified = true
+			handler.Info("cannot setup state for %s/%s -> refreshing: %s", ext.Namespace, ext.Name, err)
+		} else {
+			handler.Info("refreshing state for %s/%s", ext.Namespace, ext.Name)
+		}
+		_, err = handler.Refresh()
+		if err != nil {
+			handler.Info("cannot setup state for %s/%s -> refreshing: %s", ext.Namespace, ext.Name, err)
+			return nil, err
+		}
+	}
+	return handler, nil
+}
+
+func (s *StateHandler) ShootId() string {
+	return fmt.Sprintf("%s%s", s.EntryLabelPrefix(), s.ext.Namespace)
+}
+
+func (s *StateHandler) List() ([]dnsapi.DNSEntry, error) {
+	list := &dnsapi.DNSEntryList{}
+	err := s.client.List(s.ctx, list, client.InNamespace(s.ext.Namespace), client.MatchingLabels(map[string]string{s.ShootId(): "true"}))
 	if err != nil {
 		return nil, err
 	}
-	return &StateHandler{
-		client: client,
-		ctx:    ctx,
-		ext:    ext,
-		state:  state,
-	}, nil
+
+	return list.Items, nil
 }
 
-func (s *StateHandler) EnsureEntries(entries []*dnsapi.DNSEntry) bool {
+func (s *StateHandler) Delete(name string) error {
+	s.elem.SetName(s.ext.Name)
+	if err := s.client.Delete(s.ctx, s.elem); client.IgnoreNotFound(err) != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *StateHandler) Items() []*apis.DNSEntry {
+	return s.state.Entries
+}
+
+func (s *StateHandler) Refresh() (bool, error) {
+	list, err := s.List()
+	if err != nil {
+		return false, err
+	}
+	return s.EnsureEntries(list), nil
+}
+
+func (s *StateHandler) EnsureEntries(entries []dnsapi.DNSEntry) bool {
 	mod := false
 	names := sets.String{}
 	for _, entry := range entries {
-		mod = s.EnsureEntryFor(entry)
+		mod = s.EnsureEntryFor(&entry)
 		names.Insert(entry.Name)
 	}
 	if len(entries) != len(s.state.Entries) {
@@ -71,7 +123,7 @@ func (s *StateHandler) EnsureEntries(entries []*dnsapi.DNSEntry) bool {
 			}
 		}
 	}
-	s.modified=s.modified||mod
+	s.modified = s.modified || mod
 	return mod
 }
 
@@ -79,7 +131,7 @@ func (s *StateHandler) EnsureEntryDeleted(name string) bool {
 	for i, e := range s.state.Entries {
 		if e.Name == name {
 			s.state.Entries = append(s.state.Entries[:i], s.state.Entries[i+1:]...)
-			s.modified=true
+			s.modified = true
 			return true
 		}
 	}
@@ -102,7 +154,7 @@ func (s *StateHandler) EnsureEntryFor(entry *dnsapi.DNSEntry) bool {
 				mod = true
 				e.Labels = CopyMap(entry.Labels)
 			}
-			s.modified=s.modified||mod
+			s.modified = s.modified || mod
 			return mod
 		}
 	}
@@ -113,13 +165,14 @@ func (s *StateHandler) EnsureEntryFor(entry *dnsapi.DNSEntry) bool {
 		Annotations: CopyMap(entry.Annotations),
 		Spec:        entry.Spec.DeepCopy(),
 	}
-	s.modified=true
+	s.modified = true
 	s.state.Entries = append(s.state.Entries, e)
 	return true
 }
 
 func (s *StateHandler) Update() error {
 	if s.modified {
+		s.Info("updating modified state for %s/%s", s.ext.Namespace, s.ext.Namespace)
 		wire := &wireapi.DNSState{}
 		wire.APIVersion = wireapi.SchemeGroupVersion.String()
 		wire.Kind = wireapi.DNSStateKind
@@ -133,4 +186,3 @@ func (s *StateHandler) Update() error {
 	}
 	return nil
 }
-

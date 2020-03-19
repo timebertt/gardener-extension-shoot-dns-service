@@ -43,11 +43,10 @@ func init() {
 }
 
 func GetExtensionState(ext *extapi.Extension) (*api.DNSState, error) {
-	var state *api.DNSState
+	state := &api.DNSState{}
 	if ext.Status.State != nil && ext.Status.State.Raw != nil {
-		state = &api.DNSState{}
 		if _, _, err := decoder.Decode(ext.Status.State.Raw, nil, state); err != nil {
-			return nil, errors.Wrapf(err, "could not decode extension state")
+			return state, errors.Wrapf(err, "could not decode extension state")
 		}
 	}
 	return state, nil
