@@ -22,6 +22,9 @@ import (
 	"reflect"
 
 	"github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +34,7 @@ import (
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/apis"
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/apis/helper"
 	wireapi "github.com/gardener/gardener-extension-shoot-dns-service/pkg/apis/v1alpha1"
+	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/service"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -61,17 +65,21 @@ func NewStateHandler(env *Env, ext *v1alpha1.Extension, refresh bool) (*StateHan
 	if err != nil || refresh {
 		if err != nil {
 			handler.modified = true
-			handler.Info("cannot setup state for %s/%s -> refreshing: %s", ext.Namespace, ext.Name, err)
+			handler.Infof("cannot setup state for %s -> refreshing: %s", ext.Name, err)
 		} else {
-			handler.Info("refreshing state for %s/%s", ext.Namespace, ext.Name)
+			handler.Infof("refreshing state for %s", ext.Name)
 		}
 		_, err = handler.Refresh()
 		if err != nil {
-			handler.Info("cannot setup state for %s/%s -> refreshing: %s", ext.Namespace, ext.Name, err)
+			handler.Infof("cannot setup state for %s -> refreshing: %s", ext.Name, err)
 			return nil, err
 		}
 	}
 	return handler, nil
+}
+
+func (s *StateHandler) Infof(msg string, args ...interface{}) {
+	s.Info(fmt.Sprintf(msg, args...), "component", service.ServiceName, "namespace", s.ext.Namespace)
 }
 
 func (s *StateHandler) ShootId() string {
@@ -105,6 +113,15 @@ func (s *StateHandler) Refresh() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	list = append(list, dnsapi.DNSEntry{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "DUMMY",
+		},
+		Spec: dnsapi.DNSEntrySpec{
+			DNSName: "bla.blub.de",
+			Targets: []string{"8.8.8.8"},
+		},
+	})
 	return s.EnsureEntries(list), nil
 }
 
@@ -172,16 +189,26 @@ func (s *StateHandler) EnsureEntryFor(entry *dnsapi.DNSEntry) bool {
 
 func (s *StateHandler) Update() error {
 	if s.modified {
-		s.Info("updating modified state for %s/%s", s.ext.Namespace, s.ext.Namespace)
+		s.Infof("updating modified state for %s", s.ext.Name)
 		wire := &wireapi.DNSState{}
 		wire.APIVersion = wireapi.SchemeGroupVersion.String()
 		wire.Kind = wireapi.DNSStateKind
 		err := helper.Scheme.Convert(s.state, wire, nil)
 		if err != nil {
+			s.Infof("state conversion failed: %s", err)
 			return err
 		}
+		if s.ext.Status.State == nil {
+			s.ext.Status.State = &runtime.RawExtension{}
+		}
 		s.ext.Status.State.Raw, err = json.Marshal(wire)
-		err = s.client.Update(s.ctx, s.ext)
+		s.ext.Status.State.Object = nil
+		err = s.client.Status().Update(s.ctx, s.ext)
+		if err != nil {
+			s.Infof("update failed: %s", err)
+		} else {
+			s.modified = false
+		}
 		return err
 	}
 	return nil

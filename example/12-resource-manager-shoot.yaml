@@ -225,7 +225,7 @@ spec:
       serviceAccountName: gardener-resource-manager
       containers:
       - name: gardener-resource-manager
-        image: eu.gcr.io/gardener-project/gardener/gardener-resource-manager:0.4.0
+        image: eu.gcr.io/gardener-project/gardener/gardener-resource-manager:v0.12.0
         imagePullPolicy: IfNotPresent
         command:
         - /gardener-resource-manager

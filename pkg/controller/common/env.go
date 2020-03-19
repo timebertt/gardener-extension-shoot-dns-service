@@ -22,9 +22,11 @@ import (
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/config"
+	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/service"
 )
 
 type Env struct {
@@ -40,7 +42,12 @@ func NewEnv(name string, config config.DNSServiceConfig) *Env {
 		name:   name,
 		ctx:    context.Background(),
 		config: config,
+		Logger: log.Log.WithName(name),
 	}
+}
+
+func (e *Env) Infof(msg string, args ...interface{}) {
+	e.Info(fmt.Sprintf(msg, args...), "component", service.ServiceName)
 }
 
 func (e *Env) Context() context.Context {
@@ -75,7 +82,7 @@ func (e *Env) InjectClient(client client.Client) error {
 	return nil
 }
 
-// InjectClient injects the controller runtime client into the reconciler.
+// InjectLogger injects the controller runtime client into the reconciler.
 func (e *Env) InjectLogger(l logr.Logger) error {
 	e.Logger = l.WithName(e.name)
 	return nil
