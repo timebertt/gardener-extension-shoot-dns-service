@@ -7,6 +7,7 @@ require (
 	github.com/gardener/external-dns-management v0.7.6
 	github.com/gardener/gardener v1.0.1-0.20200213093126-7a6123b6ae21
 	github.com/gardener/gardener-extensions v1.3.1-0.20200219155613-f5f526846320
+	github.com/gardener/gardener-resource-manager v0.10.0
 	github.com/go-logr/logr v0.1.0
 	github.com/gobuffalo/packr/v2 v2.1.0
 	github.com/golang/mock v1.3.1

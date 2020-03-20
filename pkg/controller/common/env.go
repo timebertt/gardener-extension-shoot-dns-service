@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
@@ -60,6 +61,22 @@ func (e *Env) Client() client.Client {
 
 func (e *Env) Config() *config.DNSServiceConfig {
 	return &e.config
+}
+
+func (e *Env) CreateObject(obj runtime.Object, opts ...client.CreateOption) error {
+	return e.client.Create(e.ctx, obj, opts...)
+}
+
+func (e *Env) GetObject(key client.ObjectKey, obj runtime.Object) error {
+	return e.client.Get(e.ctx, key, obj)
+}
+
+func (e *Env) UpdateObject(obj runtime.Object, opts ...client.UpdateOption) error {
+	return e.client.Update(e.ctx, obj, opts...)
+}
+
+func (e *Env) ListObjects(list runtime.Object, opts ...client.ListOption) error {
+	return e.client.List(e.ctx, list, opts...)
 }
 
 // EntryLabelPrefix calculated the label prefix for dns entries managed for shoots of this garden

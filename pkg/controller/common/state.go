@@ -22,7 +22,7 @@ import (
 	"reflect"
 
 	"github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -88,11 +88,10 @@ func (s *StateHandler) ShootId() string {
 
 func (s *StateHandler) List() ([]dnsapi.DNSEntry, error) {
 	list := &dnsapi.DNSEntryList{}
-	err := s.client.List(s.ctx, list, client.InNamespace(s.ext.Namespace), client.MatchingLabels(map[string]string{s.ShootId(): "true"}))
-	if err != nil {
+	err := s.ListObjects(list, client.InNamespace(s.ext.Namespace), client.MatchingLabels(map[string]string{s.ShootId(): "true"}))
+	if err != nil && !errors.IsNotFound(err) {
 		return nil, err
 	}
-
 	return list.Items, nil
 }
 
@@ -113,15 +112,17 @@ func (s *StateHandler) Refresh() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	list = append(list, dnsapi.DNSEntry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "DUMMY",
-		},
-		Spec: dnsapi.DNSEntrySpec{
-			DNSName: "bla.blub.de",
-			Targets: []string{"8.8.8.8"},
-		},
-	})
+	/*
+		list = append(list, dnsapi.DNSEntry{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "DUMMY",
+			},
+			Spec: dnsapi.DNSEntrySpec{
+				DNSName: "bla.blub.de",
+				Targets: []string{"8.8.8.8"},
+			},
+		})
+	*/
 	return s.EnsureEntries(list), nil
 }
 

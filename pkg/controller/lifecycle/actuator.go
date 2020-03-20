@@ -20,8 +20,24 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gardener/external-dns-management/pkg/apis/dns/v1alpha1"
+	resourceapi "github.com/gardener/gardener-resource-manager/pkg/apis/resources/v1alpha1"
+
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	gardencorev1beta1helper "github.com/gardener/gardener/pkg/apis/core/v1beta1/helper"
+	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
+	"github.com/gardener/gardener/pkg/chartrenderer"
+	"github.com/gardener/gardener/pkg/client/kubernetes"
+	"github.com/gardener/gardener/pkg/utils/chart"
+	"github.com/gardener/gardener/pkg/utils/secrets"
+	"github.com/pkg/errors"
+
+	corev1 "k8s.io/api/core/v1"
+	k8serr "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/rest"
 
 	"github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/common"
 	controllerconfig "github.com/gardener/gardener-extension-shoot-dns-service/pkg/controller/config"
@@ -31,16 +47,7 @@ import (
 	"github.com/gardener/gardener-extensions/pkg/controller"
 	"github.com/gardener/gardener-extensions/pkg/controller/extension"
 	"github.com/gardener/gardener-extensions/pkg/util"
-	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
-	"github.com/gardener/gardener/pkg/chartrenderer"
-	"github.com/gardener/gardener/pkg/client/kubernetes"
-	"github.com/gardener/gardener/pkg/utils/chart"
-	"github.com/gardener/gardener/pkg/utils/secrets"
-	"github.com/pkg/errors"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/rest"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -53,6 +60,8 @@ const (
 	ShootResourcesName = service.ExtensionServiceName + "-shoot"
 	// KeptShootResourcesName is the name for resource describing the resources applied to the shoot cluster that should not be deleted.
 	KeptShootResourcesName = service.ExtensionServiceName + "-shoot-keep"
+	// OwnerName is the name of the DNSOwner object created for the shoot dns service
+	OwnerName = service.ServiceName
 )
 
 // NewActuator returns an actuator responsible for Extension resources.
@@ -95,6 +104,14 @@ func (a *actuator) Reconcile(ctx context.Context, ex *extensionsv1alpha1.Extensi
 		return err
 	}
 
+	resurrection := false
+	if ex.Status.State != nil && !common.IsMigrating(ex) {
+		resurrection, err = a.ResurrectFrom(ex)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Shoots that don't specify a DNS domain or that are scheduled to a seed that is tainted with "DNS disabled"
 	// don't get an DNS service
 	if gardencorev1beta1helper.TaintsHave(cluster.Seed.Spec.Taints, gardencorev1beta1.SeedTaintDisableDNS) ||
@@ -106,7 +123,62 @@ func (a *actuator) Reconcile(ctx context.Context, ex *extensionsv1alpha1.Extensi
 	if err := a.createShootResources(ctx, cluster, ex.Namespace); err != nil {
 		return err
 	}
-	return a.createSeedResources(ctx, cluster, ex)
+	return a.createSeedResources(ctx, cluster, ex, !resurrection)
+}
+
+func (a *actuator) ResurrectFrom(ex *extensionsv1alpha1.Extension) (bool, error) {
+	owner := &v1alpha1.DNSOwner{}
+
+	err := a.GetObject(client.ObjectKey{Name: a.OwnerName(ex.Namespace)}, owner)
+	if err == nil || !k8serr.IsNotFound(err) {
+		return false, err
+	}
+	// Ok, Owner object lost. This might have several reasons, we have to try to
+	// exclude a human error before initiating a resurrection
+
+	handler, err := common.NewStateHandler(a.Env, ex, false)
+	if err != nil {
+		return false, err
+	}
+	handler.Infof("owner object not found")
+	err = a.GetObject(client.ObjectKey{Namespace: ex.Namespace, Name: SeedResourcesName}, &resourceapi.ManagedResource{})
+	if err == nil || !k8serr.IsNotFound(err) {
+		// a potentially missing DNSOwner object will be reconciled by resource manager
+		return false, err
+	}
+
+	handler.Infof("resources object not found, also -> trying to resurrect DNS entries before setting up new owner")
+
+	found, err := handler.List()
+	if err != nil {
+		return true, err
+	}
+	names := sets.String{}
+	for _, item := range found {
+		names.Insert(item.Name)
+	}
+	for _, item := range handler.Items() {
+		if names.Has(item.Name) {
+			continue
+		}
+		obj := &v1alpha1.DNSEntry{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        item.Name,
+				Namespace:   ex.Namespace,
+				Labels:      item.Labels,
+				Annotations: item.Annotations,
+			},
+			Spec: *item.Spec,
+		}
+		err := a.CreateObject(obj)
+		if err != nil && !k8serr.IsAlreadyExists(err) {
+			return true, err
+		}
+	}
+
+	// the new onwer will be reconciled by resource manger after re-/creating
+	// the seed resource object later on
+	return true, nil
 }
 
 // Delete the Extension resource.
@@ -117,14 +189,14 @@ func (a *actuator) Delete(ctx context.Context, ex *extensionsv1alpha1.Extension)
 	return a.deleteShootResources(ctx, ex.Namespace)
 }
 
-func (a *actuator) createSeedResources(ctx context.Context, cluster *controller.Cluster, ex *extensionsv1alpha1.Extension) error {
+func (a *actuator) createSeedResources(ctx context.Context, cluster *controller.Cluster, ex *extensionsv1alpha1.Extension, refresh bool) error {
 	namespace := ex.Namespace
 	shootKubeconfig, err := a.createKubeconfig(ctx, namespace)
 	if err != nil {
 		return err
 	}
 
-	handler, err := common.NewStateHandler(a.Env, ex, true)
+	handler, err := common.NewStateHandler(a.Env, ex, refresh)
 	if err != nil {
 		return err
 	}
@@ -141,6 +213,8 @@ func (a *actuator) createSeedResources(ctx context.Context, cluster *controller.
 		"shootId":             a.ShootId(namespace),
 		"seedId":              a.Config().SeedID,
 		"dnsClass":            a.Config().DNSClass,
+		"dnsOwner":            a.OwnerName(namespace),
+		"shootActive":         !common.IsMigrating(ex),
 		"podAnnotations": map[string]interface{}{
 			"checksum/secret-kubeconfig": util.ComputeChecksum(shootKubeconfig.Data),
 		},
@@ -250,4 +324,8 @@ func (a *actuator) createManagedResource(ctx context.Context, namespace, name, c
 		renderer, filepath.Join(service.ChartsPath, chartName), chartName,
 		chartValues, injectedLabels,
 	)
+}
+
+func (a *actuator) OwnerName(namespace string) string {
+	return fmt.Sprintf("%s-%s", OwnerName, namespace)
 }

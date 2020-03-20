@@ -10,8 +10,10 @@
 .godev
 .DS_Store
 *~
+*.sw[pq]
 
 TODO
+/local
 
 # Virtual go & fuse
 .virtualgo
